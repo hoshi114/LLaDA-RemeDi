@@ -45,6 +45,29 @@ def collate_batch(batch, pad_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
     return input_ids, prompt_lengths
 
 
+def _detect_fields(sample: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Heuristically detect field mapping from a dataset sample.
+
+    Returns (text_field, prompt_field, answer_field).
+    If (prompt_field, answer_field) are resolved, text_field is None.
+    If single-field found, (text_field, None, None) is returned.
+    """
+    keys = set(sample.keys())
+    # Try paired first
+    prompt_cands = ['prompt', 'instruction', 'question', 'input', 'query']
+    answer_cands = ['answer', 'response', 'output', 'target', 'completion', 'solution']
+    for p in prompt_cands:
+        for a in answer_cands:
+            if p in keys and a in keys:
+                return None, p, a
+    # Fallback single text field
+    text_cands = ['text', 'content', 'response', 'output', 'answer', 'completion', 'target', 'solution', 'body']
+    for f in text_cands:
+        if f in keys:
+            return f, None, None
+    return None, None, None
+
+
 def build_dataset(dataset: str,
                   subset: Optional[str],
                   tokenizer: AutoTokenizer,
@@ -52,7 +75,8 @@ def build_dataset(dataset: str,
                   prompt_field: Optional[str],
                   answer_field: Optional[str],
                   max_length: int,
-                  split: str = "train"):
+                  split: str = "train",
+                  auto_fields: bool = True):
     """Load an HF dataset and tokenize into SFTExample items.
 
     This function supports three shapes:
@@ -63,23 +87,48 @@ def build_dataset(dataset: str,
     assert load_dataset is not None, "Please `pip install datasets` to use HF datasets."
     ds = load_dataset(dataset, subset, split=split)
 
+    # Inspect first sample to validate/resolve fields
+    first = ds[0]
+    keys = set(first.keys())
+    resolved_tf, resolved_pf, resolved_af = text_field, prompt_field, answer_field
+    def _has(field):
+        return (field is not None) and (field in keys)
+    # If user-provided fields don't exist, try auto-detect when allowed
+    if prompt_field and answer_field:
+        if not (_has(prompt_field) and _has(answer_field)):
+            if auto_fields:
+                resolved_tf, resolved_pf, resolved_af = _detect_fields(first)
+            else:
+                raise KeyError(f"Fields not found: {prompt_field}, {answer_field}. Available: {sorted(keys)}")
+    elif text_field:
+        if not _has(text_field):
+            if auto_fields:
+                resolved_tf, resolved_pf, resolved_af = _detect_fields(first)
+            else:
+                raise KeyError(f"Field not found: {text_field}. Available: {sorted(keys)}")
+    else:
+        if auto_fields:
+            resolved_tf, resolved_pf, resolved_af = _detect_fields(first)
+        else:
+            raise ValueError("Please provide either (text_field) or (prompt_field, answer_field)")
+
     items = []
     for row in ds:
-        if prompt_field and answer_field:
-            prompt = str(row[prompt_field])
-            answer = str(row[answer_field])
+        if resolved_pf and resolved_af:
+            prompt = str(row[resolved_pf])
+            answer = str(row[resolved_af])
             text = prompt + answer
             enc = tokenizer(text, add_special_tokens=False, truncation=True, max_length=max_length, return_tensors="pt")
             ids = enc["input_ids"][0]
             pl = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
             items.append(SFTExample(ids, pl))
-        elif text_field:
-            text = str(row[text_field])
+        elif resolved_tf:
+            text = str(row[resolved_tf])
             enc = tokenizer(text, add_special_tokens=False, truncation=True, max_length=max_length, return_tensors="pt")
             ids = enc["input_ids"][0]
             items.append(SFTExample(ids, 0))
         else:
-            raise ValueError("Please provide either (text_field) or (prompt_field, answer_field)")
+            raise ValueError(f"Cannot resolve fields from dataset. Available keys: {sorted(keys)}")
 
     return items
 
@@ -239,7 +288,8 @@ def main():
         prompt_field=args.prompt_field,
         answer_field=args.answer_field,
         max_length=args.seq_len,
-        split='train'
+        split='train',
+        auto_fields=True
     )
     def _collate(batch):
         return collate_batch(batch, pad_id=tokenizer.pad_token_id)
@@ -305,4 +355,3 @@ def main():
 if __name__ == '__main__':
     import os
     main()
-
