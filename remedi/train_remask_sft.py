@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -196,25 +197,28 @@ def compute_losses(model,
                    attention_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Compute diffusion CE on masked tokens and UPS BCE across all tokens.
     """
-    outputs = model(noisy, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-    logits = outputs.logits  # (B, L, V)
+    # Backbone is frozen; wrap in no_grad to save memory
+    with torch.no_grad():
+        outputs = model(noisy, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
+        logits = outputs.logits  # (B, L, V)
 
     # Diffusion loss: masked positions only, weighted by 1/p_mask (following LLaDA/SMDM)
     if mask_indices.any():
+        # Cast to float32 for numerical stability
         ce = F.cross_entropy(
-            logits[mask_indices],
+            logits[mask_indices].float(),
             target[mask_indices],
             reduction='none'
         )
-        denom = p_mask[mask_indices].clamp_min(1e-6)
+        denom = p_mask[mask_indices].float().clamp_min(1e-6)
         diff_loss = (ce / denom).sum() / (target.numel())
     else:
         diff_loss = torch.tensor(0.0, device=target.device)
 
     # UPS loss: build labels for all positions
     with torch.no_grad():
-        p = F.softmax(logits, dim=-1)
-        gt_prob = torch.gather(p, dim=-1, index=target.unsqueeze(-1)).squeeze(-1)  # (B, L)
+        p = F.softmax(logits.float(), dim=-1)
+        gt_prob = torch.gather(p, dim=-1, index=target.unsqueeze(-1)).squeeze(-1).float()  # (B, L)
         y = torch.where(mask_indices, gt_prob, torch.ones_like(gt_prob))  # default 1
         y = torch.where(incorrect_indices, torch.zeros_like(y), y)        # incorrect -> 0
         y = y.detach()
@@ -222,9 +226,10 @@ def compute_losses(model,
     # Hidden states for UPS head
     hidden = outputs.hidden_states[-1] if outputs.hidden_states is not None else None
     assert hidden is not None, "Model must return hidden_states; see trust_remote_code or hooks."
-    h = ups_head(hidden)  # (B, L), raw logits
-
-    bce = F.binary_cross_entropy_with_logits(h, y, reduction='mean')
+    # Align dtypes to avoid matmul dtype mismatch
+    head_dtype = next(ups_head.parameters()).dtype
+    h = ups_head(hidden.to(head_dtype))  # (B, L), raw logits
+    bce = F.binary_cross_entropy_with_logits(h.float(), y.float(), reduction='mean')
 
     loss = diff_loss + lambda_ups * bce
     metrics = {
