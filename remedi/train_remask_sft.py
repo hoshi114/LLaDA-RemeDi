@@ -258,6 +258,7 @@ def main():
     parser.add_argument('--r_incorrect', type=float, default=0.1)
     parser.add_argument('--mask_id', type=int, default=126336)
     parser.add_argument('--ups_width', type=int, default=0, help='hidden MLP width; 0 for single linear')
+    parser.add_argument('--load_ups_head', type=str, default=None, help='path to an existing UPSHead checkpoint to continue training')
     parser.add_argument('--save_path', type=str, default='checkpoints/ups_head.pt')
     args = parser.parse_args()
 
@@ -308,8 +309,24 @@ def main():
         if out.hidden_states is None:
             raise RuntimeError('Model did not return hidden_states; set trust_remote_code=True or adapt with hooks.')
         hidden_size = out.hidden_states[-1].size(-1)
-
-    ups_head = UPSHead(hidden_size=hidden_size, width=args.ups_width).to(device)
+    
+    # Build or load UPS head (for continued training)
+    if args.load_ups_head:
+        from remedi.modeling_wrappers import load_ups_head as _load_head
+        print(f"Loading UPS head from {args.load_ups_head}")
+        loaded_head, meta = _load_head(args.load_ups_head, hidden_size=hidden_size)
+        ckpt_hs = int(meta.get('hidden_size', hidden_size))
+        ckpt_width = int(meta.get('width', 0))
+        if ckpt_hs != hidden_size:
+            print(f"[Warn] checkpoint hidden_size={ckpt_hs} != runtime hidden_size={hidden_size}. Reinitializing a new head.")
+            ups_head = UPSHead(hidden_size=hidden_size, width=args.ups_width).to(device)
+        else:
+            ups_head = loaded_head.to(device)
+            # Note: if a different ups_width is passed, we keep the checkpoint width for compatibility
+            if args.ups_width and args.ups_width != ckpt_width:
+                print(f"[Info] Ignoring --ups_width={args.ups_width} due to loaded checkpoint width={ckpt_width}.")
+    else:
+        ups_head = UPSHead(hidden_size=hidden_size, width=args.ups_width).to(device)
     optimizer = torch.optim.AdamW(ups_head.parameters(), lr=args.lr)
 
     total_steps = 0

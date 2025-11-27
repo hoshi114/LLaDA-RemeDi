@@ -78,7 +78,7 @@ out = generate(
 6) Metrics & Diagnostics
 - The script prints step-wise losses: total, diffusion, UPS, plus mask/incorrect fractions.
 - For reporting, also visualize:
-  - per-step mask counts (monotonicity)
+ - per-step mask counts (monotonicity)
   - incorrect-token detection AUC (add later)
   - sample trajectories comparing `random / tps_prob / ups` confidences
 
@@ -86,3 +86,22 @@ out = generate(
 Be cautious with 8B models on a single GPU; if OOM, switch to gradient checkpointing, smaller sequence length, or a smaller backbone for smoke tests.
 ```
 
+7) Continue Training On Another Dataset (e.g., MATH-500)
+- Use the previously trained UPS head as initialization and continue training on a new dataset to adapt the unmasking policy.
+```
+python remedi/train_remask_sft.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --dataset HuggingFaceH4/MATH-500 \
+  --seq_len 1024 \
+  --batch_size 1 \
+  --epochs 1 \
+  --lr 3e-5 \
+  --lambda_ups 1.0 \
+  --r_incorrect 0.1 \
+  --mask_id 126336 \
+  --load_ups_head checkpoints/ups_head_s1k_len1024_b1_r010_l1p0_linear.pt \
+  --save_path checkpoints/ups_head_s1k_math_len1024_b1_r010_l1p0_linear.pt
+```
+Notes
+- Field mapping is auto-detected when possible; if it fails, specify `--text_field` or `--prompt_field/--answer_field` explicitly.
+- When `--load_ups_head` is provided, `--ups_width` is ignored in favor of checkpoint width. Hidden size mismatch triggers reinit.
