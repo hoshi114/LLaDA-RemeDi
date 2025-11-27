@@ -233,8 +233,10 @@ def compute_losses(model,
 
     # UPS loss: build labels for all positions
     with torch.no_grad():
-        p = F.softmax(logits.float(), dim=-1)
-        gt_prob = torch.gather(p, dim=-1, index=target.unsqueeze(-1)).squeeze(-1).float()  # (B, L)
+        # Memory-efficient ground-truth probability via log-sum-exp, no full softmax
+        sel_logits = torch.gather(logits, dim=-1, index=target.unsqueeze(-1)).squeeze(-1).float()
+        log_denom = torch.logsumexp(logits.float(), dim=-1)
+        gt_prob = torch.exp(sel_logits - log_denom)
         y = torch.where(mask_indices, gt_prob, torch.ones_like(gt_prob))  # default 1
         y = torch.where(incorrect_indices, torch.zeros_like(y), y)        # incorrect -> 0
         y = y.detach()

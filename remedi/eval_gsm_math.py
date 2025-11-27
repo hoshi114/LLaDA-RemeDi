@@ -14,9 +14,9 @@ from remedi.modeling_wrappers import load_ups_head
 def load_model_and_tokenizer(model_name: str, device: torch.device):
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     try:
-        model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model_name, trust_remote_code=True, torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32))
     except Exception:
-        model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32))
     model.eval().to(device)
     try:
         _ = model.device
@@ -104,28 +104,36 @@ def build_prompts_from_dataset(dataset: str, subset: Optional[str], split: str,
 @torch.no_grad()
 def run_source(model, tokenizer, prompts: List[str], instruct: bool,
                steps: int, gen_length: int, block_length: int, temperature: float,
-               cfg_scale: float, mask_id: int, source: str, ups_head, eos_gating: bool) -> List[str]:
+               cfg_scale: float, mask_id: int, source: str, ups_head, eos_gating: bool,
+               infer_bs: int = 1) -> List[str]:
     prompts_templ = apply_template_if_needed(tokenizer, prompts, instruct)
-    input_ids, attention_mask = prepare_inputs(tokenizer, prompts_templ)
-    input_ids = input_ids.to(model.device)
-    attention_mask = attention_mask.to(model.device)
-    out = generate(
-        model=model,
-        prompt=input_ids,
-        attention_mask=attention_mask,
-        steps=steps,
-        gen_length=gen_length,
-        block_length=block_length,
-        temperature=temperature,
-        cfg_scale=cfg_scale,
-        confidence_source=source,
-        ups_head=ups_head,
-        mask_id=mask_id,
-        logits_eos_inf=eos_gating,
-        confidence_eos_eot_inf=eos_gating,
-    )
-    decoded = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)
-    return decoded
+    outputs: List[str] = []
+    for i in range(0, len(prompts_templ), infer_bs):
+        chunk = prompts_templ[i:i + infer_bs]
+        input_ids, attention_mask = prepare_inputs(tokenizer, chunk)
+        input_ids = input_ids.to(model.device)
+        attention_mask = attention_mask.to(model.device)
+        out = generate(
+            model=model,
+            prompt=input_ids,
+            attention_mask=attention_mask,
+            steps=steps,
+            gen_length=gen_length,
+            block_length=block_length,
+            temperature=temperature,
+            cfg_scale=cfg_scale,
+            confidence_source=source,
+            ups_head=ups_head,
+            mask_id=mask_id,
+            logits_eos_inf=eos_gating,
+            confidence_eos_eot_inf=eos_gating,
+        )
+        decoded = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)
+        outputs.extend(decoded)
+        # Free cache between micro-batches
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return outputs
 
 
 def main():
@@ -147,6 +155,7 @@ def main():
     parser.add_argument('--cfg_scale', type=float, default=0.0)
     parser.add_argument('--mask_id', type=int, default=126336)
     parser.add_argument('--eos_gating', action='store_true')
+    parser.add_argument('--infer_bs', type=int, default=1)
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -176,7 +185,7 @@ def main():
         preds = run_source(
             model, tokenizer, prompts, args.instruct,
             args.steps, args.gen_length, args.block_length, args.temperature,
-            args.cfg_scale, args.mask_id, name, head, args.eos_gating
+            args.cfg_scale, args.mask_id, name, head, args.eos_gating, args.infer_bs
         )
         correct = 0
         total = len(preds)
@@ -205,4 +214,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

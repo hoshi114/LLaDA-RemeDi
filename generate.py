@@ -130,10 +130,11 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
             # Compute per-token confidence over the active block [s:e)
             # Default: TPS probability baseline
             if confidence_source == 'tps_prob':
-                p = F.softmax(logits, dim=-1)
-                # Target token: for masked positions use x0; for unmasked positions use current x
+                # Memory-efficient probability of selected token via log-sum-exp
                 target_tokens = torch.where(mask_index, x0, x)
-                confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                sel_logits = torch.gather(logits, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                log_denom = torch.logsumexp(logits, dim=-1)
+                confidence = torch.exp(sel_logits - log_denom)
             elif confidence_source == 'random':
                 confidence = torch.rand((x.shape[0], x.shape[1]), device=x.device)
             elif confidence_source == 'ups' and ups_head is not None:
@@ -144,18 +145,20 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
                     outputs = model(x, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
                 hidden = get_last_hidden_states(outputs)
                 if hidden is None:
-                    # Fallback to TPS prob if hidden unavailable
-                    p = F.softmax(logits, dim=-1)
+                    # Fallback to TPS prob if hidden unavailable (use log-sum-exp form)
                     target_tokens = torch.where(mask_index, x0, x)
-                    confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                    sel_logits = torch.gather(logits, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                    log_denom = torch.logsumexp(logits, dim=-1)
+                    confidence = torch.exp(sel_logits - log_denom)
                 else:
                     ups_scores = ups_head(hidden)  # (b, l)
                     confidence = torch.sigmoid(ups_scores)
             else:
-                # Fallback: TPS probability
-                p = F.softmax(logits, dim=-1)
+                # Fallback: TPS probability via log-sum-exp
                 target_tokens = torch.where(mask_index, x0, x)
-                confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                sel_logits = torch.gather(logits, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                log_denom = torch.logsumexp(logits, dim=-1)
+                confidence = torch.exp(sel_logits - log_denom)
 
             # Restrict to active block and non-prompt; others set to -inf
             conf_mask = torch.ones_like(confidence, dtype=torch.bool)
