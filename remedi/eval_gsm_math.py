@@ -43,9 +43,14 @@ def extract_answer_gsm8k(text: str) -> Optional[str]:
     # GSM8K answers are usually after the last occurrence of '####'
     if '####' in text:
         last = text.rsplit('####', 1)[-1]
-        ans = last.strip().splitlines()[0].strip()
-        ans = re.sub(r'[,\s]+', '', ans)
-        return ans
+        last = last.strip()
+        if last:
+            # first non-empty line after ####
+            for line in last.splitlines():
+                if line.strip():
+                    ans = re.sub(r'[,\s]+', '', line.strip())
+                    return ans
+        # fall through to numeric fallback if nothing valid after ####
     # fallback: last number in text
     nums = re.findall(r'-?\d+(?:\.\d+)?', text)
     return nums[-1] if nums else None
