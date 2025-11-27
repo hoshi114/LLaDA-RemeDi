@@ -86,7 +86,23 @@ def build_dataset(dataset: str,
     - Fallback synthetic: if datasets not available, raises an error.
     """
     assert load_dataset is not None, "Please `pip install datasets` to use HF datasets."
-    ds = load_dataset(dataset, subset, split=split)
+    # Robust split loading: try the requested split, otherwise fallback to an available split
+    try:
+        ds = load_dataset(dataset, subset, split=split)
+    except Exception:
+        ds_all = load_dataset(dataset, subset)
+        # choose a split by preference order
+        pref = [split, 'train', 'train[:90%]', 'validation', 'test']
+        chosen = None
+        for k in pref:
+            if k in ds_all:
+                chosen = k
+                break
+        if chosen is None:
+            # pick the first available key
+            chosen = list(ds_all.keys())[0]
+        print(f"[Info] Requested split '{split}' not found. Falling back to split '{chosen}'. Available: {list(ds_all.keys())}")
+        ds = ds_all[chosen]
 
     # Inspect first sample to validate/resolve fields
     first = ds[0]
@@ -258,6 +274,7 @@ def main():
     parser.add_argument('--r_incorrect', type=float, default=0.1)
     parser.add_argument('--mask_id', type=int, default=126336)
     parser.add_argument('--ups_width', type=int, default=0, help='hidden MLP width; 0 for single linear')
+    parser.add_argument('--split', type=str, default='train', help='dataset split name; auto-fallback if unavailable')
     parser.add_argument('--load_ups_head', type=str, default=None, help='path to an existing UPSHead checkpoint to continue training')
     parser.add_argument('--save_path', type=str, default='checkpoints/ups_head.pt')
     args = parser.parse_args()
@@ -294,7 +311,7 @@ def main():
         prompt_field=args.prompt_field,
         answer_field=args.answer_field,
         max_length=args.seq_len,
-        split='train',
+        split=args.split,
         auto_fields=True
     )
     def _collate(batch):

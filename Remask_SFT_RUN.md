@@ -92,6 +92,7 @@ Be cautious with 8B models on a single GPU; if OOM, switch to gradient checkpoin
 python remedi/train_remask_sft.py \
   --model_name GSAI-ML/LLaDA-8B-Base \
   --dataset HuggingFaceH4/MATH-500 \
+  --split test \
   --seq_len 1024 \
   --batch_size 1 \
   --epochs 1 \
