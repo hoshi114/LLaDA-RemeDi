@@ -43,7 +43,8 @@ def get_num_transfer_tokens(mask_index, steps):
 @ torch.no_grad()
 def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, block_length=128, temperature=0.,
              cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
-             confidence_source=None, ups_head=None):
+             confidence_source=None, ups_head=None,
+             return_trace=False, trace_batch_index=0, trace_store_indices=False):
     '''
     Args:
         model: Mask predictor.
@@ -59,6 +60,9 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
         confidence_source: Confidence policy. One of {'ups', 'tps_prob', 'random'}. If None, falls back to `remasking`.
         ups_head: Optional UPSHead module that takes last hidden states (b,l,h) and returns per-token scores (b,l).
+        return_trace: If True, also return a per-step trace for `trace_batch_index` sample.
+        trace_batch_index: Which sample in the batch to trace (default 0).
+        trace_store_indices: If True, store selected/newly-filled indices per step (may be large).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -83,6 +87,7 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         else:
             raise NotImplementedError(remasking)
 
+    trace = [] if return_trace else None
     for num_block in range(num_blocks):
         # Active answer slice for this block [s:e)
         s = prompt.shape[1] + num_block * block_length
@@ -190,13 +195,39 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
             in_block = torch.zeros_like(selected_index)
             in_block[:, s:e] = True
             answer_positions = in_block & (~prompt_index)
+            # Trace: capture mask count before updates for the traced sample
+            if return_trace and 0 <= trace_batch_index < x.size(0):
+                tb = trace_batch_index
+                mask_cnt_before = int((x[tb, s:e] == mask_id).sum().item())
             to_mask = answer_positions & (~selected_index)
             x[to_mask] = mask_id
 
             # For selected positions: if masked, write predicted tokens
             write_index = selected_index & mask_index
+            # Newly filled positions (were mask before and selected now)
+            if return_trace and 0 <= trace_batch_index < x.size(0):
+                tb = trace_batch_index
+                newly = (write_index[tb, s:e]).nonzero(as_tuple=False).squeeze(-1).tolist() if trace_store_indices else None
             x[write_index] = x0[write_index]
 
+            # Append trace entry after updates
+            if return_trace and 0 <= trace_batch_index < x.size(0):
+                tb = trace_batch_index
+                mask_cnt_after = int((x[tb, s:e] == mask_id).sum().item())
+                sel_rel = (selected_index[tb, s:e]).nonzero(as_tuple=False).squeeze(-1).tolist() if trace_store_indices else None
+                trace.append({
+                    'block': int(num_block),
+                    'step': int(i),
+                    'keep_target': int(K_abs[tb, i].item()),
+                    'mask_count_before': mask_cnt_before,
+                    'mask_count_after': mask_cnt_after,
+                    'num_selected': int(selected_index[tb, s:e].sum().item()),
+                    'selected_rel_idx': sel_rel,
+                    'newly_filled_rel_idx': newly,
+                })
+
+    if return_trace:
+        return x, trace
     return x
 
 
