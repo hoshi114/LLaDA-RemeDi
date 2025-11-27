@@ -42,7 +42,8 @@ def get_num_transfer_tokens(mask_index, steps):
 
 @ torch.no_grad()
 def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, block_length=128, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
+             cfg_scale=0., remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
+             confidence_source=None, ups_head=None):
     '''
     Args:
         model: Mask predictor.
@@ -52,10 +53,12 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
         block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         temperature: Categorical distribution sampling temperature.
         cfg_scale: Unsupervised classifier-free guidance scale.
-        remasking: Remasking strategy. 'low_confidence' or 'random'.
+        remasking: Deprecated alias for confidence mode. 'low_confidence' equals 'tps_prob', or 'random'.
         mask_id: The toke id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_source: Confidence policy. One of {'ups', 'tps_prob', 'random'}. If None, falls back to `remasking`.
+        ups_head: Optional UPSHead module that takes last hidden states (b,l,h) and returns per-token scores (b,l).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -71,10 +74,26 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
     assert steps % num_blocks == 0
     steps = steps // num_blocks
 
+    # Select confidence mode from either new flag or legacy 'remasking'
+    if confidence_source is None:
+        if remasking == 'low_confidence':
+            confidence_source = 'tps_prob'
+        elif remasking == 'random':
+            confidence_source = 'random'
+        else:
+            raise NotImplementedError(remasking)
+
     for num_block in range(num_blocks):
-        block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
-        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
+        # Active answer slice for this block [s:e)
+        s = prompt.shape[1] + num_block * block_length
+        e = prompt.shape[1] + (num_block + 1) * block_length
+
+        # Precompute the per-step absolute unmask counts K_abs by cumsum of transfer counts.
+        block_mask_index = (x[:, s:e] == mask_id)
+        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)  # (b, steps)
+        K_abs = torch.cumsum(num_transfer_tokens, dim=1)  # (b, steps)
         for i in range(steps):
+            # Mask index over full sequence and within active block
             mask_index = (x == mask_id)
             if cfg_scale > 0.:
                 un_x = x.clone()
@@ -82,11 +101,22 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
                 x_ = torch.cat([x, un_x], dim=0)
                 if attention_mask is not None:
                     attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
-                logits = model(x_, attention_mask=attention_mask_).logits
+                # Try to request hidden states for UPS when needed
+                if confidence_source == 'ups' and ups_head is not None:
+                    outputs = model(x_, attention_mask=attention_mask_, output_hidden_states=True, return_dict=True)
+                    logits = outputs.logits
+                    # Split outputs for CFG path to match logits split
+                    # hidden states for CFG path are not required for confidence
+                else:
+                    logits = model(x_, attention_mask=attention_mask_).logits
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x, attention_mask=attention_mask).logits
+                if confidence_source == 'ups' and ups_head is not None:
+                    outputs = model(x, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
+                    logits = outputs.logits
+                else:
+                    logits = model(x, attention_mask=attention_mask).logits
 
             if logits_eos_inf:
                 logits[:, :, 126081] = -torch.inf
@@ -97,25 +127,72 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
             if confidence_eos_eot_inf:
                 logits_with_noise[:, :, 126081] = logits[:, :, 126348] = -torch.inf
 
-            if remasking == 'low_confidence':
+            # Compute per-token confidence over the active block [s:e)
+            # Default: TPS probability baseline
+            if confidence_source == 'tps_prob':
                 p = F.softmax(logits, dim=-1)
-                x0_p = torch.squeeze(
-                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
-            elif remasking == 'random':
-                x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+                # Target token: for masked positions use x0; for unmasked positions use current x
+                target_tokens = torch.where(mask_index, x0, x)
+                confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+            elif confidence_source == 'random':
+                confidence = torch.rand((x.shape[0], x.shape[1]), device=x.device)
+            elif confidence_source == 'ups' and ups_head is not None:
+                # Lazily import to avoid cyclic
+                from remedi.modeling_wrappers import get_last_hidden_states
+                # If we didn't request outputs above (CFG case), fetch again with hidden states
+                if 'outputs' not in locals() or outputs.logits is not logits:
+                    outputs = model(x, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
+                hidden = get_last_hidden_states(outputs)
+                if hidden is None:
+                    # Fallback to TPS prob if hidden unavailable
+                    p = F.softmax(logits, dim=-1)
+                    target_tokens = torch.where(mask_index, x0, x)
+                    confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
+                else:
+                    ups_scores = ups_head(hidden)  # (b, l)
+                    confidence = torch.sigmoid(ups_scores)
             else:
-                raise NotImplementedError(remasking)
+                # Fallback: TPS probability
+                p = F.softmax(logits, dim=-1)
+                target_tokens = torch.where(mask_index, x0, x)
+                confidence = torch.gather(p, dim=-1, index=target_tokens.unsqueeze(-1)).squeeze(-1)
 
-            x0_p[:, prompt.shape[1] + (num_block + 1) * block_length:] = -np.inf
+            # Restrict to active block and non-prompt; others set to -inf
+            conf_mask = torch.ones_like(confidence, dtype=torch.bool)
+            conf_mask[:, :s] = False  # exclude prompt and earlier answer blocks by default
+            conf_mask[:, e:] = False  # exclude future blocks
+            confidence = torch.where(conf_mask, confidence, torch.full_like(confidence, -np.inf))
 
-            x0 = torch.where(mask_index, x0, x)
-            confidence = torch.where(mask_index, x0_p, -np.inf)
+            # Compute absolute number to keep this step per sample
+            num_keep = K_abs[:, i]  # (b,)
 
-            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+            # Select top-k per sample and build selection mask
+            selected_index = torch.zeros_like(x, dtype=torch.bool)
             for j in range(confidence.shape[0]):
-                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
-                transfer_index[j, select_index] = True
-            x[transfer_index] = x0[transfer_index]
+                k = int(num_keep[j].item())
+                if k <= 0:
+                    continue
+                # Safe topk: if all -inf, skip
+                if torch.isneginf(confidence[j, s:e]).all():
+                    continue
+                k = min(k, e - s)
+                vals, idx = torch.topk(confidence[j, s:e], k=k)
+                # Filter out -inf selections (could happen early)
+                valid = torch.isfinite(vals)
+                if valid.any():
+                    idx = idx[valid] + s
+                    selected_index[j, idx] = True
+
+            # Dynamic remask within active block: non-selected (answer positions) -> [MASK]
+            in_block = torch.zeros_like(selected_index)
+            in_block[:, s:e] = True
+            answer_positions = in_block & (~prompt_index)
+            to_mask = answer_positions & (~selected_index)
+            x[to_mask] = mask_id
+
+            # For selected positions: if masked, write predicted tokens
+            write_index = selected_index & mask_index
+            x[write_index] = x0[write_index]
 
     return x
 
