@@ -38,7 +38,7 @@ The model extends the standard `LLaDA` backbone by adding a lightweight **UPS He
 
 ## 🛠️ Quick Start (Planned)
 
-> *Note: The following commands represent the planned usage and directory structure.*
+This repo integrates a RemeDi UPS head on top of the LLaDA backbone and reuses the SMDM masked‑diffusion training shell for Remask SFT. The following reflects the near‑term plan and interfaces.
 
 ### Requirements
 ```bash
@@ -47,36 +47,51 @@ cd LLaDA-RemeDi
 pip install -r requirements.txt
 ```
 
-### Data Preparation
-Generate synthetic training data with UPS labels:
-```bash
-# Planned script for data generation
-python scripts/prepare_data.py --config configs/remedi_data.yaml
-```
+### Data & Datasets
+- Primary (bring‑up): `simplescaling/s1K-1.1`
+- Math (reasoning/visualization): `HuggingFaceH4/MATH-500`
+- Code/Instruction: `OpenCoder-LLM/opc-sft-stage2` with subsets `educational_instruct`, `evol_instruct`, `mceval_instruct`
+- Optional (eval‑only): GSM8K, HumanEval/MBPP
 
-### Training (SFT)
-Fine-tune the LLaDA model with the RemeDi head:
+Remask SFT performs in‑code noise injection per RemeDi: mask noise ρ_mask(t)=t and incorrect‑token noise ρ_incorrect(t)=4 r t (1−t) on the answer span; the prompt remains clean.
+
+### Training (Remask SFT)
+We will provide a minimal script that reuses the SMDM trainer:
 ```bash
-# Planned script for SFT training
-python train.py --config configs/sft_remedi.yaml
+# Upcoming minimal trainer (freeze backbone; train UPS head)
+python train_remask_sft.py \
+  --dataset simplescaling/s1K-1.1 \
+  --model GSAI-ML/LLaDA-8B-Base \
+  --mask_id 126336 \
+  --r_incorrect 0.1 \
+  --seq_len 1024
 ```
+Notes:
+- Loss = diffusion CE on masked positions + UPS BCE on all positions (masked labels use stop‑grad pθ(x0|xt)).
+- Initial phase trains only the UPS head; LoRA on the backbone is optional later.
+
+### Inference
+Dynamic remasking is enabled in the sampler with a selectable confidence source:
+- `ups`: sigmoid(h) from the UPS head (recommended after SFT)
+- `tps_prob`: pθ(x̂ | x_t) from TPS (current baseline)
+- `random`: uniform baseline
+
+OpenCompass wrapper threads this flag into `generate()`; EOS/EoT gating and CFG remain available.
 
 ---
 
 ## 📝 Progress & Analysis
 
 ### Current Progress
-- [x] **Project Initialization**: Setup repository and environment.
-- [ ] **Phase 1: Architecture** - Integrate UPS Head into LLaDA backbone.
-- [ ] **Phase 2: Data Pipeline** - Implemente noise injection strategy for UPS labels.
-- [ ] **Phase 3: SFT** - Training loop setup on AutoDL (A100/4090).
-- [ ] **Phase 4: Analysis** - Verify re-masking behavior on test cases.
+- [x] Project initialization and plan (`RemeDi_Plan.md`)
+- [ ] Phase 1: UPS head wrapper + sampler dynamic remask (confidence_source)
+- [ ] Phase 2: Remask SFT (SMDM shell; freeze backbone; train UPS head)
+- [ ] Phase 3: Targeted eval (MATH‑500/OPC; optional GSM8K/HumanEval subsets)
+- [ ] Phase 4: Visualizations and ablations (mask‑count monotonicity, r/steps/block_length)
 
-### Challenges & Solutions (Thinking Process)
-
-*(This section records the engineering journey and problem-solving process)*
-
-*(To be updated during development)*
+### Notes
+- Maintain monotonic mask schedule by aligning per‑step top‑K with block sampling and answer span; non‑selected answer tokens are re‑masked each step.
+- Preserve fallbacks: if UPS is unavailable, use `tps_prob` or `random` to keep demos and evaluation scripts functioning.
 
 ---
 
