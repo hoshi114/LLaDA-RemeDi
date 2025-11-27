@@ -46,3 +46,23 @@ def get_last_hidden_states(outputs) -> torch.Tensor:
     # Not available; caller must handle None (fallback confidence source)
     return None
 
+
+def load_ups_head(path: str, hidden_size: int = None):
+    """Load a saved UPSHead checkpoint and construct the head.
+
+    Args:
+        path: torch.load()-able checkpoint path containing
+              {'state_dict', 'hidden_size', 'width', ...}
+        hidden_size: optional override if checkpoint omits it
+    Returns:
+        head: UPSHead with loaded weights
+        meta: dict metadata from checkpoint
+    """
+    ckpt = torch.load(path, map_location='cpu')
+    width = int(ckpt.get('width', 0))
+    hs = int(ckpt.get('hidden_size', hidden_size))
+    if hs is None:
+        raise ValueError('hidden_size must be provided either in checkpoint or as argument')
+    head = UPSHead(hidden_size=hs, width=width)
+    head.load_state_dict(ckpt['state_dict'])
+    return head, ckpt
