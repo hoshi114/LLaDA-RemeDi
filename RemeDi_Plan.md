@@ -100,16 +100,14 @@ This document summarises our plan to implement RemeDi on top of LLaDA, reflectin
 
 ## 6) Step-by-Step Execution
 
-- Phase A: Wire-up (local)
-  - Add UPS head wrapper; add `confidence_source` to sampler; implement dynamic remasking.
-  - Keep fallbacks working.
-- Phase B: Minimal SFT (server)
-  - Implement Remask SFT with SMDM trainer; train UPS head on s1K-1.1 with short context.
-  - Save and test the head; compare `random / tps_prob / ups` outputs.
-- Phase C: Targeted eval & visuals (server)
-  - MATH-500 small run + trajectories; OPC subsets small run; optional GSM8K/HumanEval subsets.
-- Phase D: Optional scaling (server)
-  - Enable LoRA for a couple of layers if needed; repeat a subset of evaluations.
+- Phase A: Wire-up (local) [completed]
+  - Added UPS head wrapper; added `confidence_source` to sampler; implemented dynamic remasking; preserved fallbacks.
+- Phase B: Minimal SFT (server) [completed]
+  - Implemented Remask SFT; trained UPS head on s1K-1.1 (seq_len=1024, batch=1); verified inference.
+- Phase C: Targeted eval & continued SFT (server) [completed]
+  - Continued training on MATH-500 (test) and GSM8K (train). Small-sample GSM8K (n=50): ups acc=0.360, tps_prob acc=0.260, random acc=0.120.
+- Phase D: Optional scaling (server) [pending]
+  - Enable LoRA for a couple of layers; ablations and larger-scale evaluation.
 
 
 ## 7) File Pointers
@@ -126,3 +124,9 @@ This document summarises our plan to implement RemeDi on top of LLaDA, reflectin
 - Default to UPS head if available; otherwise use TPS probability; `random` only for baselines.
 - If hidden states inaccessible, use hooks; if hooks fail, use TPS heuristics; later swap in proper UPS once training completes.
 - Keep prompt clean during SFT; apply both noises only to the answer span.
+
+## 9) Next Steps
+
+- Ablations: sweep `r_incorrect` (0.05/0.1/0.2), `lambda_ups` (0.5–2.0), `ups_width` (0/512/1024), `seq_len` (1024/1536/2048).
+- Broader evaluation: larger GSM8K/MATH subsets and OPC subsets; consider OpenCompass tasks.
+- LoRA: optional partial backbone adaptation if further gains are desired.

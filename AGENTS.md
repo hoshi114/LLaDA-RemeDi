@@ -4,16 +4,20 @@
 - Root scripts: `generate.py` (text sampling), `get_log_likelihood.py` (conditional likelihood), `chat.py` (CLI chat), `app.py` (Gradio demo), `eval_llada.py` (lm-eval adapter).
 - Data and assets: `data/` (e.g., `poem_data.json`), `imgs/` (figures), `visualization/` (step-by-step sampling visualizers).
 - Benchmarks: `eval_llada_lm_eval.sh` (lm-eval), `eval_llada_opencompass.sh`, `opencompass/` (vendored configs and runner).
+ - RemeDi (new): `remedi/train_remask_sft.py` (Remask SFT trainer), `remedi/modeling_wrappers.py` (UPS head), `remedi/infer_compare.py` (inference comparison), `remedi/eval_gsm_math.py` (GSM/MATH eval), `Local_RUN.md`, `Remask_SFT_RUN.md`.
 
 ## Build, Test, and Development Commands
 - Create env (recommended): `python -m venv .venv && source .venv/bin/activate`.
-- Install (minimal): `pip install transformers==4.38.2 gradio torch` (see scripts for extras).
+- Install (minimal): `pip install transformers==4.38.2 gradio torch` (see scripts for extras). For training, `pip install -r requirements-train.txt`.
 - Run chat: `python chat.py`.
 - Run demo UI: `python app.py`.
 - Sample generation (batch supported): `python generate.py`.
 - Log-likelihood example: `python get_log_likelihood.py`.
 - lm-eval: `bash ./eval_llada_lm_eval.sh` (sets `HF_ALLOW_CODE_EVAL=1`, `HF_DATASETS_TRUST_REMOTE_CODE=true`).
 - OpenCompass: `bash ./eval_llada_opencompass.sh` (installs `opencompass/` in editable mode).
+ - Remask SFT (freeze backbone): see `Remask_SFT_RUN.md` or `remedi/train_remask_sft.py --help`.
+ - Inference comparison: `python remedi/infer_compare.py --model_name ... --ups_head ...`.
+ - GSM/MATH eval: `python remedi/eval_gsm_math.py --model_name ... --ups_head ...`.
 
 ## Coding Style & Naming Conventions
 - Python 3.8+; follow PEP 8, 4-space indent; UTF-8; ASCII in source unless needed.
@@ -24,7 +28,7 @@
 ## Testing Guidelines
 - Smoke tests: run `python chat.py` and `python generate.py` to verify inference; for ppl/gen tasks, run a single lm-eval/OpenCompass job before PR (see the two `*.sh` scripts).
 - If adding unit tests, prefer `pytest` with `tests/test_*.py`; keep tests GPU-conditional when possible and skip network by default.
-- For changes to `generate.py` or `get_log_likelihood.py`, include before/after metrics on a small subset (e.g., GSM8K 20 samples).
+- For changes to `generate.py` or `get_log_likelihood.py`, include before/after metrics on a small subset (e.g., GSM8K 20 samples). For Remask SFT changes, attach small-sample accuracy from `remedi/eval_gsm_math.py` and a short `infer_compare` log.
 
 ## Commit & Pull Request Guidelines
 - Commits: imperative mood and scoped when helpful, e.g., `Fix: clamp EOS logits in generate.py`, `Add: OpenCompass GSM8K config` (repo history uses Add/Update/Delete/Fix).
@@ -34,3 +38,4 @@
 ## Security & Configuration Tips
 - GPU strongly recommended; set left-padding if needed (see note in `generate.py`).
 - For HumanEval/MBPP, the scripts enable code execution—run in isolated env and review outputs.
+ - For servers with limited memory, set `--infer_bs 1`, reduce `--gen_length` in eval, and prefer bf16.

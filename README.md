@@ -36,15 +36,16 @@ The model extends the standard `LLaDA` backbone by adding a lightweight **UPS He
 
 ---
 
-## 🛠️ Quick Start (Planned)
+## 🛠️ Quick Start
 
-This repo integrates a RemeDi UPS head on top of the LLaDA backbone and reuses the SMDM masked‑diffusion training shell for Remask SFT. The following reflects the near‑term plan and interfaces.
+This repo integrates a RemeDi UPS head on top of the LLaDA backbone and reuses a minimal masked‑diffusion trainer for Remask SFT.
 
 ### Requirements
 ```bash
 git clone https://github.com/your-username/LLaDA-RemeDi.git
 cd LLaDA-RemeDi
-pip install -r requirements.txt
+# minimal training deps
+pip install -r requirements-train.txt
 ```
 
 ### Data & Datasets
@@ -53,45 +54,79 @@ pip install -r requirements.txt
 - Code/Instruction: `OpenCoder-LLM/opc-sft-stage2` with subsets `educational_instruct`, `evol_instruct`, `mceval_instruct`
 - Optional (eval‑only): GSM8K, HumanEval/MBPP
 
-Remask SFT performs in‑code noise injection per RemeDi: mask noise ρ_mask(t)=t and incorrect‑token noise ρ_incorrect(t)=4 r t (1−t) on the answer span; the prompt remains clean.
+Remask SFT performs in‑code noise injection per RemeDi: mask noise rho_mask(t)=t and incorrect‑token noise rho_incorrect(t)=4 r t (1−t) on the answer span; the prompt remains clean.
 
 ### Training (Remask SFT)
-We will provide a minimal script that reuses the SMDM trainer:
+Freeze backbone; train the UPS head only.
 ```bash
-# Upcoming minimal trainer (freeze backbone; train UPS head)
-python train_remask_sft.py \
+# s1K bring-up (1 epoch)
+python remedi/train_remask_sft.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
   --dataset simplescaling/s1K-1.1 \
-  --model GSAI-ML/LLaDA-8B-Base \
+  --seq_len 1024 --batch_size 1 --epochs 1 \
+  --lr 1e-4 --lambda_ups 1.0 --r_incorrect 0.1 \
   --mask_id 126336 \
-  --r_incorrect 0.1 \
-  --seq_len 1024
+  --save_path checkpoints/ups_head_s1k_len1024_b1_r010_l1p0_linear.pt
+
+# continue training on MATH-500 (adapt policy)
+python remedi/train_remask_sft.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --dataset HuggingFaceH4/MATH-500 --split test \
+  --seq_len 1024 --batch_size 1 --epochs 1 \
+  --lr 3e-5 --lambda_ups 1.0 --r_incorrect 0.1 \
+  --mask_id 126336 \
+  --load_ups_head checkpoints/ups_head_s1k_len1024_b1_r010_l1p0_linear.pt \
+  --save_path checkpoints/ups_head_s1k_math_len1024_b1_r010_l1p0_linear.pt
 ```
 Notes:
-- Loss = diffusion CE on masked positions + UPS BCE on all positions (masked labels use stop‑grad pθ(x0|xt)).
+- Loss = diffusion CE on masked positions + UPS BCE on all positions (masked labels use stop‑grad p(x0|xt)).
 - Initial phase trains only the UPS head; LoRA on the backbone is optional later.
 
-### Inference
+### Inference (Compare)
 Dynamic remasking is enabled in the sampler with a selectable confidence source:
 - `ups`: sigmoid(h) from the UPS head (recommended after SFT)
 - `tps_prob`: pθ(x̂ | x_t) from TPS (current baseline)
 - `random`: uniform baseline
+```bash
+python remedi/infer_compare.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --ups_head checkpoints/ups_head_s1k_math_len1024_b1_r010_l1p0_linear.pt \
+  --prompt "Give a brief plan for learning calculus." \
+  --prompt "Write a Python function to reverse a string." \
+  --steps 128 --gen_length 128 --block_length 16 \
+  --temperature 0.0 --cfg_scale 0.0 --mask_id 126336 \
+  --logits_eos_inf --confidence_eos_eot_inf
+```
+See also `Local_RUN.md` and `Remask_SFT_RUN.md`.
 
-OpenCompass wrapper threads this flag into `generate()`; EOS/EoT gating and CFG remain available.
+### Evaluation (GSM8K/MATH)
+```bash
+# GSM8K 50-sample eval (numeric accuracy)
+python remedi/eval_gsm_math.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --ups_head checkpoints/ups_head_s1k_math_gsm8k_len1024_b1_r010_l1p0_linear.pt \
+  --dataset openai/gsm8k --subset main --split test --format gsm8k \
+  --max_samples 50 --infer_bs 1 \
+  --steps 128 --gen_length 128 --block_length 16 \
+  --temperature 0.0 --cfg_scale 0.0 --mask_id 126336 --eos_gating
+```
 
 ---
 
-## 📝 Progress & Analysis
+## 📊 Results (Preliminary)
 
-### Current Progress
-- [x] Project initialization and plan (`RemeDi_Plan.md`)
-- [ ] Phase 1: UPS head wrapper + sampler dynamic remask (confidence_source)
-- [ ] Phase 2: Remask SFT (SMDM shell; freeze backbone; train UPS head)
-- [ ] Phase 3: Targeted eval (MATH‑500/OPC; optional GSM8K/HumanEval subsets)
-- [ ] Phase 4: Visualizations and ablations (mask‑count monotonicity, r/steps/block_length)
+- GSM8K 50-sample (Base, steps=128, gen_length=128, block_length=16, eos/eot gating):
+  - ups acc=0.360, tps_prob acc=0.260, random acc=0.120
+  - All methods extracted answers (coverage=1.0).
 
-### Notes
-- Maintain monotonic mask schedule by aligning per‑step top‑K with block sampling and answer span; non‑selected answer tokens are re‑masked each step.
-- Preserve fallbacks: if UPS is unavailable, use `tps_prob` or `random` to keep demos and evaluation scripts functioning.
+These results indicate the trained UPS head improves unmasking decisions over the TPS-probability heuristic on math word problems. Full-scale evaluation is left to future work.
+
+## ✅ Status
+
+- [x] Phase A: Sampler dynamic remask + UPS head scaffold
+- [x] Phase B: Remask SFT (s1K → MATH-500/GSM8K continued training)
+- [x] Phase C: Small-sample evaluation (GSM8K) and inference comparison
+- [ ] Phase D: Scaling & ablations (r_incorrect, lambda_ups, ups_width, seq_len)
 
 ---
 
