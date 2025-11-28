@@ -1,6 +1,8 @@
 agent/
 data/
+outputs/
 paper/
+pre/
 SMDM/
 
 # Byte-compiled / optimized / DLL files
