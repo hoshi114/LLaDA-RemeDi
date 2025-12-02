@@ -82,6 +82,32 @@ Notes:
 - Loss = diffusion CE on masked positions + UPS BCE on all positions (masked labels use stop‑grad p(x0|xt)).
 - Initial phase trains only the UPS head; LoRA on the backbone is optional later.
 
+### Training (LoRA TPS + UPS)
+Enable TPS+UPS联合训练：使用 LoRA 调优骨架（TPS），同时继续训练 UPS 头（BCE 的梯度不回传到骨架）。
+```bash
+# joint 模式（推荐）
+python remedi/train_remask_lora.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --dataset simplescaling/s1K-1.1 \
+  --seq_len 1024 --batch_size 1 --epochs 1 --grad_accum 2 \
+  --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 --lora_target auto \
+  --lr_lora 5e-5 --lr_ups 1e-4 \
+  --lambda_ups 1.0 --r_incorrect 0.1 --mask_id 126336 \
+  --save_lora_dir checkpoints/lora_s1k \
+  --save_ups_head checkpoints/ups_head_s1k_lora.pt
+
+# alternating 模式（TPS:UPS=4:1）
+python remedi/train_remask_lora.py \
+  --model_name GSAI-ML/LLaDA-8B-Base \
+  --dataset HuggingFaceH4/MATH-500 --split test \
+  --seq_len 1024 --batch_size 1 --epochs 1 \
+  --train_mode alternating --alt_ratio 4 \
+  --load_lora_dir checkpoints/lora_s1k \
+  --load_ups_head checkpoints/ups_head_s1k_lora.pt \
+  --save_lora_dir checkpoints/lora_math \
+  --save_ups_head checkpoints/ups_head_math_lora.pt
+```
+
 ### Inference (Compare)
 Dynamic remasking is enabled in the sampler with a selectable confidence source:
 - `ups`: sigmoid(h) from the UPS head (recommended after SFT)
@@ -91,6 +117,7 @@ Dynamic remasking is enabled in the sampler with a selectable confidence source:
 python remedi/infer_compare.py \
   --model_name GSAI-ML/LLaDA-8B-Base \
   --ups_head checkpoints/ups_head_s1k_math_len1024_b1_r010_l1p0_linear.pt \
+  --lora_path checkpoints/lora_math \
   --prompt "Give a brief plan for learning calculus." \
   --prompt "Write a Python function to reverse a string." \
   --steps 128 --gen_length 128 --block_length 16 \
@@ -105,6 +132,7 @@ See also `Local_RUN.md` and `Remask_SFT_RUN.md`.
 python remedi/eval_gsm_math.py \
   --model_name GSAI-ML/LLaDA-8B-Base \
   --ups_head checkpoints/ups_head_s1k_math_gsm8k_len1024_b1_r010_l1p0_linear.pt \
+  --lora_path checkpoints/lora_math \
   --dataset openai/gsm8k --subset main --split test --format gsm8k \
   --max_samples 50 --infer_bs 1 \
   --steps 128 --gen_length 128 --block_length 16 \

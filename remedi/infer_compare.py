@@ -8,7 +8,7 @@ from generate import generate
 from remedi.modeling_wrappers import load_ups_head
 
 
-def load_model_and_tokenizer(model_name: str, device: torch.device):
+def load_model_and_tokenizer(model_name: str, device: torch.device, lora_path: str = None):
     """Load HF model/tokenizer with trust_remote_code and move to device.
 
     Falls back between AutoModelForCausalLM and AutoModel to be compatible with
@@ -16,11 +16,21 @@ def load_model_and_tokenizer(model_name: str, device: torch.device):
     """
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # Prefer non-causal if available; otherwise use CausalLM
+    is_causal = False
     try:
         model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
     except Exception:
         model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
+        is_causal = True
     model.eval().to(device)
+    # Optionally load LoRA adapters
+    if lora_path:
+        try:
+            from peft import PeftModel
+        except Exception as e:
+            raise RuntimeError("--lora_path specified but peft is not installed. Please `pip install peft`." ) from e
+        model = PeftModel.from_pretrained(model, lora_path)
+        model.eval().to(device)
     # Ensure downstream code can read model.device
     try:
         _ = model.device
@@ -55,6 +65,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, required=True)
     parser.add_argument('--ups_head', type=str, default=None, help='Path to trained UPS head checkpoint (.pt)')
+    parser.add_argument('--lora_path', type=str, default=None, help='Optional LoRA adapter directory to load')
     parser.add_argument('--prompts_file', type=str, default=None, help='Text file with one prompt per line')
     parser.add_argument('--prompt', action='append', default=None, help='Prompt string; can be repeated')
     parser.add_argument('--instruct', action='store_true', help='Apply chat template for instruct models')
@@ -70,7 +81,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model, tokenizer = load_model_and_tokenizer(args.model_name, device)
+    model, tokenizer = load_model_and_tokenizer(args.model_name, device, lora_path=args.lora_path)
 
     # Compose prompts
     prompts: List[str] = []
@@ -141,4 +152,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

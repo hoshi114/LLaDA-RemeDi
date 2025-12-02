@@ -4,11 +4,11 @@
 - Root scripts: `generate.py` (text sampling), `get_log_likelihood.py` (conditional likelihood), `chat.py` (CLI chat), `app.py` (Gradio demo), `eval_llada.py` (lm-eval adapter).
 - Data and assets: `data/` (e.g., `poem_data.json`), `imgs/` (figures), `visualization/` (step-by-step sampling visualizers).
 - Benchmarks: `eval_llada_lm_eval.sh` (lm-eval), `eval_llada_opencompass.sh`, `opencompass/` (vendored configs and runner).
- - RemeDi (new): `remedi/train_remask_sft.py` (Remask SFT trainer), `remedi/modeling_wrappers.py` (UPS head), `remedi/infer_compare.py` (inference comparison), `remedi/eval_gsm_math.py` (GSM/MATH eval), `Local_RUN.md`, `Remask_SFT_RUN.md`.
+ - RemeDi (new): `remedi/train_remask_sft.py` (Remask SFT trainer), `remedi/train_remask_lora.py` (LoRA TPS+UPS trainer), `remedi/train_utils.py` (shared utils), `remedi/modeling_wrappers.py` (UPS head), `remedi/infer_compare.py` (inference comparison), `remedi/eval_gsm_math.py` (GSM/MATH eval), `Local_RUN.md`, `Remask_SFT_RUN.md`.
 
 ## Build, Test, and Development Commands
 - Create env (recommended): `python -m venv .venv && source .venv/bin/activate`.
-- Install (minimal): `pip install transformers==4.38.2 gradio torch` (see scripts for extras). For training, `pip install -r requirements-train.txt`.
+- Install (minimal): `pip install transformers==4.38.2 gradio torch` (see scripts for extras). For training, `pip install -r requirements-train.txt` (includes `peft`).
 - Run chat: `python chat.py`.
 - Run demo UI: `python app.py`.
 - Sample generation (batch supported): `python generate.py`.
@@ -16,8 +16,9 @@
 - lm-eval: `bash ./eval_llada_lm_eval.sh` (sets `HF_ALLOW_CODE_EVAL=1`, `HF_DATASETS_TRUST_REMOTE_CODE=true`).
 - OpenCompass: `bash ./eval_llada_opencompass.sh` (installs `opencompass/` in editable mode).
  - Remask SFT (freeze backbone): see `Remask_SFT_RUN.md` or `remedi/train_remask_sft.py --help`.
- - Inference comparison: `python remedi/infer_compare.py --model_name ... --ups_head ...`.
- - GSM/MATH eval: `python remedi/eval_gsm_math.py --model_name ... --ups_head ...`.
+ - LoRA TPS+UPS: `python remedi/train_remask_lora.py --model_name ... [--load_lora_dir ...] [--load_ups_head ...]`.
+ - Inference comparison: `python remedi/infer_compare.py --model_name ... --ups_head ... [--lora_path ...]`.
+ - GSM/MATH eval: `python remedi/eval_gsm_math.py --model_name ... --ups_head ... [--lora_path ...]`.
 
 ## Coding Style & Naming Conventions
 - Python 3.8+; follow PEP 8, 4-space indent; UTF-8; ASCII in source unless needed.

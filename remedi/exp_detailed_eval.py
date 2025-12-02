@@ -25,13 +25,20 @@ def set_deterministic():
         pass
 
 
-def load_model_and_tokenizer(model_name: str, device: torch.device):
+def load_model_and_tokenizer(model_name: str, device: torch.device, lora_path: str = None):
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     try:
         model = AutoModel.from_pretrained(model_name, trust_remote_code=True, torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32))
     except Exception:
         model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32))
     model.eval().to(device)
+    if lora_path:
+        try:
+            from peft import PeftModel
+        except Exception as e:
+            raise RuntimeError("--lora_path specified but peft is not installed. Please `pip install peft`." ) from e
+        model = PeftModel.from_pretrained(model, lora_path)
+        model.eval().to(device)
     try:
         _ = model.device
     except AttributeError:
@@ -57,6 +64,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, required=True)
     parser.add_argument('--ups_head', type=str, required=True)
+    parser.add_argument('--lora_path', type=str, default=None, help='Optional LoRA adapter directory to load')
     parser.add_argument('--dataset', type=str, default='openai/gsm8k')
     parser.add_argument('--subset', type=str, default=None)
     parser.add_argument('--split', type=str, default='test')
@@ -83,7 +91,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.out_jsonl), exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model, tokenizer = load_model_and_tokenizer(args.model_name, device)
+    model, tokenizer = load_model_and_tokenizer(args.model_name, device, lora_path=args.lora_path)
 
     # Load dataset
     ds = load_dataset(args.dataset, args.subset, split=args.split)
@@ -188,4 +196,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
