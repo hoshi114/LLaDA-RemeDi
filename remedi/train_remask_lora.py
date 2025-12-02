@@ -233,23 +233,26 @@ def main():
             outputs = model(noisy, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
             logits = outputs.logits
 
+            # Decide which objectives to run
+            run_tps = (should_run_tps(global_step) or args.train_mode == 'joint') and bool(mask_idx.any())
+            run_ups = (should_run_ups(global_step) or args.train_mode == 'joint')
+
             # TPS loss (CE on mask)
-            if should_run_tps(global_step) or args.train_mode == 'joint':
-                if mask_idx.any():
-                    ce = torch.nn.functional.cross_entropy(
-                        logits[mask_idx].float(),
-                        input_ids[mask_idx],
-                        reduction='none',
-                    )
-                    denom = p_mask[mask_idx].float().clamp_min(1e-6)
-                    loss_tps = (ce / denom).sum() / (input_ids.numel())
-                else:
-                    loss_tps = torch.tensor(0.0, device=device)
+            if run_tps:
+                ce = torch.nn.functional.cross_entropy(
+                    logits[mask_idx].float(),
+                    input_ids[mask_idx],
+                    reduction='none',
+                )
+                denom = p_mask[mask_idx].float().clamp_min(1e-6)
+                loss_tps = (ce / denom).sum() / (input_ids.numel())
                 # Backprop only to LoRA
-                (loss_tps / args.grad_accum).backward(retain_graph=True)
+                (loss_tps / args.grad_accum).backward()
+            else:
+                loss_tps = torch.tensor(0.0, device=device)
 
             # UPS loss (BCE on all tokens); labels use stop-grad pθ(x0|xt)
-            if should_run_ups(global_step) or args.train_mode == 'joint':
+            if run_ups:
                 with torch.no_grad():
                     sel_logits = torch.gather(logits, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1).float()
                     log_denom = torch.logsumexp(logits.float(), dim=-1)
@@ -265,17 +268,17 @@ def main():
                 h = ups_head(hidden.detach().to(head_dtype))
                 loss_ups = torch.nn.functional.binary_cross_entropy_with_logits(h.float(), y.float(), reduction='mean')
                 (loss_ups / args.grad_accum).backward()
-
+            
             accum_i += 1
             if accum_i % args.grad_accum == 0:
-                if should_run_tps(global_step) or args.train_mode in ('joint', 'tps-only'):
+                if run_tps or args.train_mode in ('joint', 'tps-only'):
                     if args.clip_grad and args.clip_grad > 0:
                         torch.nn.utils.clip_grad_norm_(
                             [p for p in model.parameters() if p.requires_grad], args.clip_grad)
                     opt_lora.step()
                     opt_lora.zero_grad(set_to_none=True)
 
-                if should_run_ups(global_step) or args.train_mode in ('joint', 'ups-only'):
+                if run_ups or args.train_mode in ('joint', 'ups-only'):
                     if args.clip_grad and args.clip_grad > 0:
                         torch.nn.utils.clip_grad_norm_(ups_head.parameters(), args.clip_grad)
                     opt_ups.step()
@@ -320,4 +323,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
